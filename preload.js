@@ -8,4 +8,5 @@ contextBridge.exposeInMainWorld('steamAPI', {
   openUrl: (url) => ipcRenderer.invoke('open-url', url),
   getCurrentVersion: () => ipcRenderer.invoke('get-current-version'),
   checkUpdate: () => ipcRenderer.invoke('check-update'),
+  onDealsPartial: (callback) => ipcRenderer.on('deals-partial', (_, data) => callback(data)),
 });

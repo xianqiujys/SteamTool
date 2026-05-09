@@ -94,10 +94,31 @@ function render() {
       </div>`;
 
     $grid.appendChild(card);
+    // Bind CDKey click events if data already cached
+    if (priceInfo) {
+      bindCdkeyClicks(card);
+    }
   }
 
   // Pagination
   renderPagination(totalPages);
+}
+
+function parseCNYPrice(str) {
+  if (!str) return 0;
+  const m = str.replace(/[^0-9.]/g, '');
+  return parseFloat(m) || 0;
+}
+
+function usdToCNY(usd, retailUSD, originalCNY) {
+  // Convert USD price to approximate CNY using the ratio of known prices
+  if (!retailUSD || !originalCNY) return null;
+  return Math.round(originalCNY * (usd / retailUSD) * 100) / 100;
+}
+
+function formatCNY(val) {
+  if (val === null || val === undefined) return '';
+  return `¥${val.toFixed(2)}`;
 }
 
 function buildPriceInfoHTML(info, game) {
@@ -106,31 +127,40 @@ function buildPriceInfoHTML(info, game) {
   }
 
   let html = '';
+  const originalCNY = parseCNYPrice(game.originalPrice);
 
-  // Historical low badge
-  if (info.historicalLow !== undefined) {
-    const steamUSD = info.steamPriceUSD;
-    if (steamUSD !== undefined && steamUSD <= info.historicalLow + 0.01) {
+  // Historical low badge — display in CNY
+  if (info.historicalLowUSD !== undefined && info.retailPriceUSD) {
+    const historicalLowCNY = usdToCNY(info.historicalLowUSD, info.retailPriceUSD, originalCNY);
+    const currentCNY = parseCNYPrice(game.finalPrice);
+    const isAtLow = currentCNY > 0 && historicalLowCNY !== null && currentCNY <= historicalLowCNY + 0.5;
+
+    if (isAtLow) {
       html += `<div class="historical-low-row">
         <span class="badge-historical-low is-low">史低!</span>
-        <span class="historical-low-detail">历史最低 $${info.historicalLow.toFixed(2)}</span>
+        <span class="historical-low-detail">国区史低 ${formatCNY(historicalLowCNY)}</span>
       </div>`;
-    } else {
+    } else if (historicalLowCNY !== null) {
       html += `<div class="historical-low-row">
-        <span class="badge-historical-low">史低 $${info.historicalLow.toFixed(2)}</span>
+        <span class="badge-historical-low">史低 ${formatCNY(historicalLowCNY)}</span>
         <span class="historical-low-detail">${info.historicalLowDate || ''}</span>
       </div>`;
     }
   }
 
-  // CDKey cheapest
-  if (info.cdkeyPrice !== undefined) {
-    const isCheaper = info.steamPriceUSD !== undefined && info.cdkeyPrice < info.steamPriceUSD;
-    html += `<div class="cdkey-row${isCheaper ? ' cdkey-cheaper' : ''}" data-dealid="${info.cdkeyDealID || ''}">
+  // CDKey cheapest — display in CNY, clickable
+  if (info.cdkeyPriceUSD !== undefined && info.retailPriceUSD) {
+    const cdkeyCNY = usdToCNY(info.cdkeyPriceUSD, info.retailPriceUSD, originalCNY);
+    const currentCNY = parseCNYPrice(game.finalPrice);
+    const isCheaper = currentCNY > 0 && cdkeyCNY !== null && cdkeyCNY < currentCNY;
+    const cdkeyUrl = info.cdkeyUrl || '';
+
+    html += `<div class="cdkey-row${isCheaper ? ' cdkey-cheaper' : ''}" data-url="${escapeHtml(cdkeyUrl)}">
       <span class="cdkey-label">CDKey</span>
-      <span class="cdkey-price">$${info.cdkeyPrice.toFixed(2)}</span>
+      <span class="cdkey-price">${cdkeyCNY !== null ? formatCNY(cdkeyCNY) : `$${info.cdkeyPriceUSD.toFixed(2)}`}</span>
       <span class="cdkey-store">${escapeHtml(info.cdkeyStore || '')}</span>
       ${isCheaper ? '<span class="cdkey-cheaper-tag">更低</span>' : ''}
+      <span class="cdkey-link-icon">&#8599;</span>
     </div>`;
   }
 
@@ -139,6 +169,18 @@ function buildPriceInfoHTML(info, game) {
   }
 
   return html;
+}
+
+function bindCdkeyClicks(container) {
+  container.querySelectorAll('.cdkey-row[data-url]').forEach((row) => {
+    const url = row.dataset.url;
+    if (!url) return;
+    row.style.cursor = 'pointer';
+    row.addEventListener('click', (e) => {
+      e.stopPropagation(); // don't trigger card click (Steam store)
+      window.steamAPI.openUrl(url);
+    });
+  });
 }
 
 async function loadPriceInfoForCurrentPage() {
@@ -168,6 +210,7 @@ async function loadPriceInfoForCurrentPage() {
       const el = document.getElementById(`extra-${game.appid}`);
       if (el) {
         el.innerHTML = buildPriceInfoHTML(priceInfoCache[game.appid], game);
+        bindCdkeyClicks(el);
       }
     }
   } catch (err) {
@@ -272,6 +315,21 @@ function showError(msg) {
 
 // Init - fetch data on startup
 async function init() {
+  let shownEarly = false;
+
+  // Listen for first batch of deals — show immediately
+  window.steamAPI.onDealsPartial((partialDeals) => {
+    if (shownEarly) return;
+    shownEarly = true;
+    dealsData = partialDeals;
+    $tabs[0].textContent = `热门折扣 ≥50% (${dealsData.length}+)`;
+    $loading.style.display = 'none';
+    $content.style.display = 'block';
+    $loading.querySelector('p').textContent = '正在获取新游戏数据...';
+    render();
+    loadPriceInfoForCurrentPage();
+  });
+
   try {
     // Fetch both in parallel
     const [deals, newReleases] = await Promise.all([
@@ -282,19 +340,21 @@ async function init() {
     dealsData = deals;
     newReleasesData = newReleases;
 
-    // Update tab labels with counts
+    // Update tab labels with final counts
     $tabs[0].textContent = `热门折扣 ≥50% (${dealsData.length})`;
-    $tabs[1].textContent = `新游戏 7天内 (${newReleasesData.length})`;
+    $tabs[1].textContent = `今日新游 (${newReleasesData.length})`;
 
-    $loading.style.display = 'none';
-    $content.style.display = 'block';
+    if (!shownEarly) {
+      $loading.style.display = 'none';
+      $content.style.display = 'block';
+    }
     render();
-
-    // Load price info for the first page
     loadPriceInfoForCurrentPage();
   } catch (err) {
     console.error('Failed to fetch Steam data:', err);
-    showError(`获取 Steam 数据失败: ${err.message}`);
+    if (!shownEarly) {
+      showError(`获取 Steam 数据失败: ${err.message}`);
+    }
   }
 
   // Check for updates (non-blocking)

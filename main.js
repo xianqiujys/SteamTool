@@ -24,7 +24,7 @@ function createWindow() {
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 }
 
-// ── HTTP helper (uses Node https, no fetch dependency) ──
+// ── HTTP helper ──
 
 function httpsGet(url) {
   return new Promise((resolve, reject) => {
@@ -47,8 +47,14 @@ function httpsGet(url) {
       res.on('error', reject);
     });
     req.on('error', reject);
-    req.setTimeout(15000, () => { req.destroy(); reject(new Error('Request timeout')); });
+    req.setTimeout(10000, () => { req.destroy(); reject(new Error('Request timeout')); });
   });
+}
+
+function sendProgress(msg) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('loading-progress', msg);
+  }
 }
 
 async function fetchSteamSearch(params) {
@@ -105,7 +111,8 @@ function parseChineseDate(str) {
 
 // ── IPC handlers ──
 
-ipcMain.handle('fetch-deals', async () => {
+// Stream deals batch by batch to frontend
+ipcMain.handle('fetch-deals', async (event) => {
   const allGames = [];
   let start = 0;
   const batchSize = 100;
@@ -125,6 +132,11 @@ ipcMain.handle('fetch-deals', async () => {
     const filtered = games.filter((g) => g.discountPercent >= 50);
     allGames.push(...filtered);
 
+    // Send partial results so frontend can render immediately
+    if (i === 0 && mainWindow) {
+      mainWindow.webContents.send('deals-partial', allGames.slice());
+    }
+
     if (games.length < batchSize) break;
     start += batchSize;
   }
@@ -137,9 +149,9 @@ ipcMain.handle('fetch-new-releases', async () => {
   let start = 0;
   const batchSize = 100;
   const now = new Date();
-  const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < 3; i++) {
     const data = await fetchSteamSearch({
       sort_by: 'Released_DESC',
       category1: '998',
@@ -160,7 +172,7 @@ ipcMain.handle('fetch-new-releases', async () => {
         continue;
       }
       const parsed = parseChineseDate(g.releaseDate);
-      if (parsed && parsed < sevenDaysAgo) {
+      if (parsed && parsed < todayStart) {
         hitOldGame = true;
         break;
       }
@@ -195,67 +207,61 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-async function fetchCheapSharkGameID(steamAppID) {
+async function fetchCheapSharkInfo(steamAppID) {
   try {
     const raw = await httpsGet(`https://www.cheapshark.com/api/1.0/games?steamAppID=${steamAppID}`);
     const arr = JSON.parse(raw);
-    if (arr && arr.length > 0) return arr[0].gameID;
+    if (!arr || arr.length === 0) return null;
+
+    const gameID = arr[0].gameID;
+    const detailRaw = await httpsGet(`https://www.cheapshark.com/api/1.0/games?id=${gameID}`);
+    return JSON.parse(detailRaw);
   } catch (_) {}
   return null;
 }
 
-async function fetchCheapSharkDetail(gameID) {
-  try {
-    const raw = await httpsGet(`https://www.cheapshark.com/api/1.0/games?id=${gameID}`);
-    return JSON.parse(raw);
-  } catch (_) {}
-  return null;
+function extractPriceInfo(detail) {
+  const info = {};
+  const steamDeal = (detail.deals || []).find((d) => d.storeID === '1');
+  info.steamPriceUSD = steamDeal ? parseFloat(steamDeal.price) : 0;
+  info.retailPriceUSD = steamDeal ? parseFloat(steamDeal.retailPrice) : 0;
+
+  if (detail.cheapestPriceEver) {
+    info.historicalLowUSD = parseFloat(detail.cheapestPriceEver.price);
+    info.historicalLowDate = detail.cheapestPriceEver.date
+      ? new Date(detail.cheapestPriceEver.date * 1000).toLocaleDateString('zh-CN')
+      : '';
+  }
+
+  const nonSteamDeals = (detail.deals || []).filter((d) => d.storeID !== '1');
+  if (nonSteamDeals.length > 0) {
+    const cheapest = nonSteamDeals.reduce((a, b) =>
+      parseFloat(a.price) <= parseFloat(b.price) ? a : b
+    );
+    info.cdkeyPriceUSD = parseFloat(cheapest.price);
+    info.cdkeyRetailUSD = parseFloat(cheapest.retailPrice);
+    info.cdkeyStore = STORE_NAMES[cheapest.storeID] || `Store#${cheapest.storeID}`;
+    info.cdkeyUrl = `https://www.cheapshark.com/redirect?dealID=${encodeURIComponent(cheapest.dealID)}`;
+  }
+
+  return info;
 }
 
 ipcMain.handle('fetch-price-info', async (_, appids) => {
   const results = {};
-  // Process in batches of 5 to avoid rate limiting
+  // Batch 5 at a time to avoid CheapShark rate limiting
   for (let i = 0; i < appids.length; i += 5) {
     const batch = appids.slice(i, i + 5);
     const promises = batch.map(async (appid) => {
-      const gameID = await fetchCheapSharkGameID(appid);
-      if (!gameID) return;
-
-      const detail = await fetchCheapSharkDetail(gameID);
-      if (!detail) return;
-
-      const info = {};
-
-      // Historical low
-      if (detail.cheapestPriceEver) {
-        info.historicalLow = parseFloat(detail.cheapestPriceEver.price);
-        info.historicalLowDate = detail.cheapestPriceEver.date
-          ? new Date(detail.cheapestPriceEver.date * 1000).toLocaleDateString('zh-CN')
-          : '';
-      }
-
-      // Current Steam price (USD) from CheapShark
-      const steamDeal = (detail.deals || []).find((d) => d.storeID === '1');
-      if (steamDeal) {
-        info.steamPriceUSD = parseFloat(steamDeal.price);
-      }
-
-      // Cheapest non-Steam deal (CDKey)
-      const nonSteamDeals = (detail.deals || []).filter((d) => d.storeID !== '1');
-      if (nonSteamDeals.length > 0) {
-        const cheapest = nonSteamDeals.reduce((a, b) =>
-          parseFloat(a.price) <= parseFloat(b.price) ? a : b
-        );
-        info.cdkeyPrice = parseFloat(cheapest.price);
-        info.cdkeyStore = STORE_NAMES[cheapest.storeID] || `Store#${cheapest.storeID}`;
-        info.cdkeyDealID = cheapest.dealID;
-      }
-
-      results[appid] = info;
+      try {
+        const detail = await fetchCheapSharkInfo(appid);
+        if (detail) {
+          results[appid] = extractPriceInfo(detail);
+        }
+      } catch (_) {}
     });
-
     await Promise.all(promises);
-    if (i + 5 < appids.length) await sleep(250);
+    if (i + 5 < appids.length) await sleep(200);
   }
   return results;
 });

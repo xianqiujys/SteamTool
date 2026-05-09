@@ -299,6 +299,25 @@ header h1 {
   gap: 5px;
   font-size: 11px;
   color: #8f98a0;
+  padding: 3px 4px;
+  border-radius: 3px;
+  transition: background 0.15s;
+}
+
+.cdkey-row[data-url]:hover {
+  background: rgba(103, 193, 245, 0.1);
+}
+
+.cdkey-link-icon {
+  margin-left: auto;
+  font-size: 13px;
+  color: #67c1f5;
+  opacity: 0.4;
+  transition: opacity 0.15s;
+}
+
+.cdkey-row[data-url]:hover .cdkey-link-icon {
+  opacity: 1;
 }
 
 .cdkey-label {
