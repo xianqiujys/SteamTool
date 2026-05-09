@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Steam 优惠工具</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <div class="header-top">
+      <h1>Steam 优惠工具</h1>
+      <div class="version-area">
+        <span class="version-text" id="version-text"></span>
+        <button class="update-btn" id="update-btn" style="display:none;"></button>
+      </div>
+    </div>
+    <div class="tabs">
+      <button class="tab active" data-tab="deals">热门折扣 (≥50%)</button>
+      <button class="tab" data-tab="new">新游戏 (7天内)</button>
+    </div>
+  </header>
+
+  <div id="loading">
+    <div class="spinner"></div>
+    <p>正在从 Steam 获取数据...</p>
+  </div>
+
+  <main id="content" style="display: none;">
+    <div class="stats" id="stats"></div>
+    <div class="grid" id="grid"></div>
+    <div class="pagination" id="pagination"></div>
+  </main>
+
+  <div id="error" style="display: none;">
+    <p id="error-msg"></p>
+    <button onclick="location.reload()">重试</button>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
